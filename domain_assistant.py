@@ -244,26 +244,59 @@ class TextGenerator(Protocol):
 
 class OpenAIGenerator:
     def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
-        if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
         self.max_output_tokens = max_output_tokens
+        self.gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if self.gemini_key:
+            try:
+                import google.generativeai as genai
+            except ImportError:
+                raise RuntimeError("GEMINI_API_KEY found but google-generativeai is not installed. Run: pip install google-generativeai")
+            genai.configure(api_key=self.gemini_key)
+            self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+            self.gemini_model = genai.GenerativeModel(self.model_name)
+        else:
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            self.model = os.getenv("OPENAI_MODEL", "").strip()
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY or GEMINI_API_KEY is missing from .env")
+            if not self.model:
+                raise RuntimeError("OPENAI_MODEL is missing from .env")
+            self.client = OpenAI(api_key=api_key)
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        if self.gemini_key:
+            import time
+            from google.api_core.exceptions import ResourceExhausted
+            
+            for attempt in range(10):
+                try:
+                    response = self.gemini_model.generate_content(
+                        prompt,
+                        generation_config={"temperature": 0.0, "max_output_tokens": self.max_output_tokens}
+                    )
+                    break
+                except ResourceExhausted:
+                    print(f"Rate limit hit (attempt {attempt+1}), waiting 65 seconds...")
+                    time.sleep(65)
+            else:
+                raise RuntimeError("Failed after 10 retries due to rate limit")
+
+            answer = response.text.strip() if response.text else ""
+            time.sleep(2) # Reduce proactive sleep, rely on exception handler
+            if not answer:
+                raise RuntimeError("Gemini returned an empty answer")
+            return answer
+        else:
+            response = self.client.responses.create(
+                model=self.model,
+                input=prompt,
+                temperature=0,
+                max_output_tokens=self.max_output_tokens,
+            )
+            answer = response.output_text.strip()
+            if not answer:
+                raise RuntimeError("OpenAI returned an empty answer")
+            return answer
 
 
 @dataclass(frozen=True)
